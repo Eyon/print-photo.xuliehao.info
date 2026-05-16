@@ -1,0 +1,17 @@
+node_modules
+dist
+dist-ssr
+data
+downloads
+logs
+mac-receipt-printer-agent
+.git
+.env
+.env.*
+!.env.example
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.local
+*.tsbuildinfo
+.DS_Store
