@@ -48,16 +48,6 @@ interface WechatSdk {
   config(config: WechatJsConfig & { debug?: boolean }): void
   ready(callback: () => void): void
   error(callback: (error: unknown) => void): void
-  chooseMedia?: (options: {
-    count: number
-    mediaType: string[]
-    sourceType: string[]
-    sizeType: string[]
-    camera: 'back' | 'front'
-    success: (result: { tempFiles: Array<{ tempFilePath: string; size?: number }> }) => void
-    fail?: (error: unknown) => void
-    cancel?: () => void
-  }) => void
   chooseImage(options: {
     count: number
     sizeType: string[]
@@ -227,11 +217,6 @@ const importWechatMedia = async (mediaId: string, originalName = `wechat-${Date.
   setPendingUpload((await response.json()) as UploadResponse)
 }
 
-const getWechatMediaName = (tempFilePath: string) => {
-  const extension = tempFilePath.match(/\.([a-z0-9]{1,8})(?:[?#].*)?$/i)?.[1]?.toLowerCase()
-  return `wechat-${Date.now()}${extension ? `.${extension}` : '.jpg'}`
-}
-
 const uploadWechatLocalImage = async (localId: string, originalName?: string) => {
   if (!window.wx) {
     throw new Error('微信上传环境还没有准备好')
@@ -280,50 +265,13 @@ const chooseWechatImageOriginal = async () =>
     })
   })
 
-const chooseWechatMediaOriginal = async () =>
-  new Promise<string>((resolve, reject) => {
-    if (!window.wx?.chooseMedia) {
-      reject(new Error('当前微信版本不支持 chooseMedia'))
-      return
-    }
-
-    window.wx.chooseMedia({
-      count: 1,
-      mediaType: ['image'],
-      sourceType: ['album', 'camera'],
-      sizeType: ['original'],
-      camera: 'back',
-      success: ({ tempFiles }) => {
-        const tempFilePath = tempFiles[0]?.tempFilePath
-        if (!tempFilePath) {
-          reject(new Error('已取消选择图片'))
-          return
-        }
-
-        resolve(tempFilePath)
-      },
-      fail: (error) => reject(new Error(getErrorText(error, '选择图片失败'))),
-      cancel: () => reject(new Error('已取消选择图片')),
-    })
-  })
-
 const pickWithWechat = async () => {
   if (!window.wx || !isWechatReady.value) {
     throw new Error('微信上传环境还没有准备好')
   }
 
-  try {
-    const tempFilePath = await chooseWechatMediaOriginal()
-    await uploadWechatLocalImage(tempFilePath, getWechatMediaName(tempFilePath))
-  } catch (error) {
-    if (isSelectionCancel(error)) {
-      throw error
-    }
-
-    message.value = '正在切换微信原图上传方式'
-    const localId = await chooseWechatImageOriginal()
-    await uploadWechatLocalImage(localId)
-  }
+  const localId = await chooseWechatImageOriginal()
+  await uploadWechatLocalImage(localId)
 }
 
 const uploadFile = async (file: File) => {

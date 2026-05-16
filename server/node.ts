@@ -85,6 +85,24 @@ const ensureDataDirs = async () => {
 
 const normalizeContentType = (contentType: string) => contentType.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
 
+const readWechatErrorPayload = (buffer: Buffer) => {
+	const text = buffer.toString("utf8", 0, Math.min(buffer.byteLength, 2048)).trim();
+	if (!text.startsWith("{")) {
+		return null;
+	}
+
+	try {
+		const data = JSON.parse(text) as { errcode?: number; errmsg?: string };
+		if (typeof data.errcode === "number" || typeof data.errmsg === "string") {
+			return data;
+		}
+	} catch {
+		return null;
+	}
+
+	return null;
+};
+
 const normalizeStoreId = (value: unknown) => {
 	const raw = typeof value === "string" ? value.trim() : "";
 	const normalized = raw.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
@@ -492,7 +510,7 @@ app.get(
 			timestamp,
 			nonceStr,
 			signature,
-			jsApiList: ["chooseMedia", "chooseImage", "uploadImage"],
+			jsApiList: ["chooseImage", "uploadImage"],
 		});
 	}),
 );
@@ -520,6 +538,20 @@ app.post(
 		}
 
 		const imageBytes = Buffer.from(await response.arrayBuffer());
+		const wechatError = readWechatErrorPayload(imageBytes);
+		if (wechatError) {
+			res.status(502).json({
+				error: `Failed to download WeChat media: ${wechatError.errmsg ?? "unknown WeChat error"}`,
+				errcode: wechatError.errcode,
+			});
+			return;
+		}
+
+		if (!contentType.startsWith("image/")) {
+			res.status(502).json({ error: `Failed to download WeChat media: unexpected content type ${contentType}` });
+			return;
+		}
+
 		if (imageBytes.byteLength > maxUploadBytes) {
 			res.status(413).json({ error: `Image is too large. The current limit is ${Math.floor(maxUploadBytes / 1024 / 1024)}MB.` });
 			return;
