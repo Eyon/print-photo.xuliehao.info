@@ -85,6 +85,43 @@ const ensureDataDirs = async () => {
 
 const normalizeContentType = (contentType: string) => contentType.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
 
+const detectImageContentType = (buffer: Buffer) => {
+	if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+		return "image/jpeg";
+	}
+
+	if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+		return "image/png";
+	}
+
+	if (buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") {
+		return "image/webp";
+	}
+
+	if (buffer.length >= 6) {
+		const signature = buffer.toString("ascii", 0, 6);
+		if (signature === "GIF87a" || signature === "GIF89a") {
+			return "image/gif";
+		}
+	}
+
+	if (buffer.length >= 4) {
+		const signature = buffer.toString("ascii", 0, 4);
+		if (signature === "II*\x00" || signature === "MM\x00*") {
+			return "image/tiff";
+		}
+	}
+
+	if (buffer.length >= 12 && buffer.toString("ascii", 4, 8) === "ftyp") {
+		const brand = buffer.toString("ascii", 8, 12).toLowerCase();
+		if (brand.startsWith("hei") || brand.startsWith("mif") || brand.startsWith("msf")) {
+			return brand.includes("f") ? "image/heif" : "image/heic";
+		}
+	}
+
+	return null;
+};
+
 const readWechatErrorPayload = (buffer: Buffer) => {
 	const text = buffer.toString("utf8", 0, Math.min(buffer.byteLength, 2048)).trim();
 	if (!text.startsWith("{")) {
@@ -140,7 +177,12 @@ const getFileExtension = (fileName: string, contentType: string) => {
 	return fallback[normalizeContentType(contentType)] ?? "bin";
 };
 
-const getImageContentType = (fileName: string, contentType: string) => {
+const getImageContentType = (fileName: string, contentType: string, buffer?: Buffer) => {
+	const detectedContentType = buffer ? detectImageContentType(buffer) : null;
+	if (detectedContentType) {
+		return detectedContentType;
+	}
+
 	const normalizedContentType = normalizeContentType(contentType);
 	if (normalizedContentType.startsWith("image/")) {
 		return normalizedContentType;
@@ -554,14 +596,15 @@ app.post(
 		mediaUrl.searchParams.set("media_id", mediaId);
 
 		const response = await fetch(mediaUrl);
-		const contentType = normalizeContentType(response.headers.get("content-type") ?? "image/jpeg");
-		if (!response.ok || contentType === "application/json") {
+		const responseContentType = normalizeContentType(response.headers.get("content-type") ?? "image/jpeg");
+		if (!response.ok || responseContentType === "application/json") {
 			const data = (await response.json().catch(() => null)) as { errmsg?: string } | null;
 			res.status(502).json({ error: `Failed to download WeChat media: ${data?.errmsg ?? response.statusText}` });
 			return;
 		}
 
 		const imageBytes = Buffer.from(await response.arrayBuffer());
+		const contentType = getImageContentType("", responseContentType, imageBytes);
 		const wechatError = readWechatErrorPayload(imageBytes);
 		if (wechatError) {
 			res.status(502).json({
@@ -608,7 +651,7 @@ app.post(
 			return;
 		}
 
-		const contentType = getImageContentType(req.file.originalname, req.file.mimetype);
+		const contentType = getImageContentType(req.file.originalname, req.file.mimetype, req.file.buffer);
 		if (!contentType.startsWith("image/")) {
 			res.status(415).json({ error: "Only image files can be uploaded." });
 			return;
