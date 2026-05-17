@@ -51,6 +51,11 @@ interface WechatCache {
 	expiresAt: number;
 }
 
+interface WechatApiError {
+	errcode?: number;
+	errmsg?: string;
+}
+
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
 const dataDir = path.resolve(process.env.DATA_DIR ?? "data");
@@ -325,25 +330,42 @@ const setWechatCache = async (name: "access-token" | "jsapi-ticket", value: stri
 	});
 };
 
-const getWechatAccessToken = async () => {
-	const cached = await getWechatCache("access-token");
+const clearWechatCache = async (name: "access-token" | "jsapi-ticket") => {
+	await rm(path.join(dirs.wechat, `${name}.json`), { force: true });
+};
+
+const isWechatAccessTokenError = (data: WechatApiError | null) =>
+	data?.errcode === 40001 || data?.errcode === 40014 || data?.errcode === 42001 || data?.errmsg?.includes("access_token");
+
+const getWechatAccessToken = async (options: { ignoreCache?: boolean } = {}) => {
+	const cached = options.ignoreCache ? null : await getWechatCache("access-token");
 	if (cached) {
 		return cached;
 	}
 
-	const tokenUrl = new URL("https://api.weixin.qq.com/cgi-bin/token");
-	tokenUrl.searchParams.set("grant_type", "client_credential");
-	tokenUrl.searchParams.set("appid", requiredEnv("WECHAT_APP_ID"));
-	tokenUrl.searchParams.set("secret", requiredEnv("WECHAT_APP_SECRET"));
+	const tokenUrl = new URL("https://api.weixin.qq.com/cgi-bin/stable_token");
+	const response = await fetch(tokenUrl, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			grant_type: "client_credential",
+			appid: requiredEnv("WECHAT_APP_ID"),
+			secret: requiredEnv("WECHAT_APP_SECRET"),
+			force_refresh: false,
+		}),
+	});
 
-	const response = await fetch(tokenUrl);
-	const data = (await response.json()) as { access_token?: string; expires_in?: number; errmsg?: string };
+	const data = (await response.json()) as { access_token?: string; expires_in?: number } & WechatApiError;
 	if (!response.ok || !data.access_token) {
-		throw new Error(`Failed to get WeChat access_token: ${data.errmsg ?? response.statusText}`);
+		throw new Error(`Failed to get WeChat stable access_token: ${data.errmsg ?? response.statusText}`);
 	}
 
 	await setWechatCache("access-token", data.access_token, data.expires_in);
 	return data.access_token;
+};
+
+const resetWechatCredentialCache = async () => {
+	await Promise.all([clearWechatCache("access-token"), clearWechatCache("jsapi-ticket")]);
 };
 
 const getWechatJsapiTicket = async () => {
@@ -352,19 +374,43 @@ const getWechatJsapiTicket = async () => {
 		return cached;
 	}
 
-	const accessToken = await getWechatAccessToken();
+	let accessToken = await getWechatAccessToken();
 	const ticketUrl = new URL("https://api.weixin.qq.com/cgi-bin/ticket/getticket");
 	ticketUrl.searchParams.set("access_token", accessToken);
 	ticketUrl.searchParams.set("type", "jsapi");
 
-	const response = await fetch(ticketUrl);
-	const data = (await response.json()) as { ticket?: string; expires_in?: number; errmsg?: string };
+	let response = await fetch(ticketUrl);
+	let data = (await response.json()) as { ticket?: string; expires_in?: number } & WechatApiError;
+	if ((!response.ok || !data.ticket) && isWechatAccessTokenError(data)) {
+		await resetWechatCredentialCache();
+		accessToken = await getWechatAccessToken({ ignoreCache: true });
+		ticketUrl.searchParams.set("access_token", accessToken);
+		response = await fetch(ticketUrl);
+		data = (await response.json()) as { ticket?: string; expires_in?: number } & WechatApiError;
+	}
+
 	if (!response.ok || !data.ticket) {
 		throw new Error(`Failed to get WeChat jsapi_ticket: ${data.errmsg ?? response.statusText}`);
 	}
 
 	await setWechatCache("jsapi-ticket", data.ticket, data.expires_in);
 	return data.ticket;
+};
+
+const downloadWechatMedia = async (mediaId: string, options: { ignoreCache?: boolean } = {}) => {
+	const accessToken = await getWechatAccessToken({ ignoreCache: options.ignoreCache });
+	const mediaUrl = new URL("https://api.weixin.qq.com/cgi-bin/media/get");
+	mediaUrl.searchParams.set("access_token", accessToken);
+	mediaUrl.searchParams.set("media_id", mediaId);
+
+	const response = await fetch(mediaUrl);
+	const responseContentType = normalizeContentType(response.headers.get("content-type") ?? "image/jpeg");
+	const errorData =
+		!response.ok || responseContentType === "application/json"
+			? ((await response.json().catch(() => null)) as WechatApiError | null)
+			: null;
+
+	return { response, responseContentType, errorData };
 };
 
 const saveJob = (job: PrintJob) => writeJson(jobPath(job.id), job);
@@ -590,16 +636,14 @@ app.post(
 			return;
 		}
 
-		const accessToken = await getWechatAccessToken();
-		const mediaUrl = new URL("https://api.weixin.qq.com/cgi-bin/media/get");
-		mediaUrl.searchParams.set("access_token", accessToken);
-		mediaUrl.searchParams.set("media_id", mediaId);
+		let { response, responseContentType, errorData } = await downloadWechatMedia(mediaId);
+		if ((!response.ok || responseContentType === "application/json") && isWechatAccessTokenError(errorData)) {
+			await resetWechatCredentialCache();
+			({ response, responseContentType, errorData } = await downloadWechatMedia(mediaId, { ignoreCache: true }));
+		}
 
-		const response = await fetch(mediaUrl);
-		const responseContentType = normalizeContentType(response.headers.get("content-type") ?? "image/jpeg");
 		if (!response.ok || responseContentType === "application/json") {
-			const data = (await response.json().catch(() => null)) as { errmsg?: string } | null;
-			res.status(502).json({ error: `Failed to download WeChat media: ${data?.errmsg ?? response.statusText}` });
+			res.status(502).json({ error: `Failed to download WeChat media: ${errorData?.errmsg ?? response.statusText}` });
 			return;
 		}
 
