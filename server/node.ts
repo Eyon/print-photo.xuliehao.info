@@ -109,6 +109,18 @@ const normalizeStoreId = (value: unknown) => {
 	return normalized.slice(0, 64) || "home";
 };
 
+const contentTypeByExtension: Record<string, string> = {
+	jpg: "image/jpeg",
+	jpeg: "image/jpeg",
+	png: "image/png",
+	webp: "image/webp",
+	gif: "image/gif",
+	heic: "image/heic",
+	heif: "image/heif",
+	tif: "image/tiff",
+	tiff: "image/tiff",
+};
+
 const getFileExtension = (fileName: string, contentType: string) => {
 	const fromName = fileName.toLowerCase().match(/\.([a-z0-9]{1,8})$/)?.[1];
 	if (fromName) {
@@ -122,9 +134,20 @@ const getFileExtension = (fileName: string, contentType: string) => {
 		"image/gif": "gif",
 		"image/heic": "heic",
 		"image/heif": "heif",
+		"image/tiff": "tiff",
 	};
 
 	return fallback[normalizeContentType(contentType)] ?? "bin";
+};
+
+const getImageContentType = (fileName: string, contentType: string) => {
+	const normalizedContentType = normalizeContentType(contentType);
+	if (normalizedContentType.startsWith("image/")) {
+		return normalizedContentType;
+	}
+
+	const extension = fileName.toLowerCase().match(/\.([a-z0-9]{1,8})$/)?.[1] ?? "";
+	return contentTypeByExtension[extension] ?? normalizedContentType;
 };
 
 const safeOriginalName = (fileName: string) => fileName.replace(/[^\w.\-\u4e00-\u9fa5]/g, "_").slice(0, 120) || "upload";
@@ -391,6 +414,7 @@ const publicTempUpload = (upload: TempUpload) => ({
 	uploadId: upload.id,
 	storeId: upload.storeId,
 	originalName: upload.originalName,
+	contentType: upload.contentType,
 	size: upload.size,
 	previewUrl: `/api/uploads/${upload.id}/image`,
 	printUrl: `/api/uploads/${upload.id}/print`,
@@ -584,14 +608,15 @@ app.post(
 			return;
 		}
 
-		if (!req.file.mimetype.startsWith("image/")) {
+		const contentType = getImageContentType(req.file.originalname, req.file.mimetype);
+		if (!contentType.startsWith("image/")) {
 			res.status(415).json({ error: "Only image files can be uploaded." });
 			return;
 		}
 
 		const tempUpload = await createTempUpload({
 			buffer: req.file.buffer,
-			contentType: req.file.mimetype,
+			contentType,
 			originalName: req.file.originalname,
 			storeId: normalizeStoreId(req.body?.storeId),
 			source: "direct",

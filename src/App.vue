@@ -7,6 +7,7 @@ interface UploadResponse {
   uploadId: string
   storeId: string
   originalName: string
+  contentType: string
   size: number
   previewUrl: string
   printUrl: string
@@ -87,6 +88,7 @@ const printStartNotice = '打印任务会在 5 秒内开始，如果未能开始
 const canPickImage = computed(() => !isBusy.value && (!useWechatSdk.value || isWechatReady.value))
 const canConfirmPrint = computed(() => Boolean(pendingUpload.value) && !currentJob.value && !isBusy.value)
 const visibleMessage = computed(() => (message.value === '请选择一张照片' ? '' : message.value))
+const imageFileExtensionPattern = /\.(heic|heif|jpg|jpeg|png|webp|gif|tif|tiff)$/i
 const pickButtonText = computed(() => {
   if (isBusy.value) {
     return '处理中'
@@ -128,6 +130,20 @@ const getErrorText = (error: unknown, fallback: string) => {
 }
 
 const isSelectionCancel = (error: unknown) => /cancel|取消/i.test(getErrorText(error, ''))
+
+const isSupportedImageFile = (file: File) => file.type.startsWith('image/') || imageFileExtensionPattern.test(file.name)
+
+const formatFileSize = (size: number) => {
+  if (size >= 1024 * 1024) {
+    return `${(size / 1024 / 1024).toFixed(1)} MB`
+  }
+
+  if (size >= 1024) {
+    return `${Math.round(size / 1024)} KB`
+  }
+
+  return `${size} B`
+}
 
 const stopPolling = () => {
   if (pollTimer) {
@@ -275,8 +291,8 @@ const pickWithWechat = async () => {
 }
 
 const uploadFile = async (file: File) => {
-  if (!file.type.startsWith('image/')) {
-    throw new Error('请选择图片文件')
+  if (!isSupportedImageFile(file)) {
+    throw new Error('请选择图片文件，支持 HEIC/JPEG/PNG')
   }
 
   const formData = new FormData()
@@ -326,7 +342,7 @@ const pickImage = async () => {
   errorMessage.value = ''
 
   if (!useWechatSdk.value) {
-    fileInput.value?.click()
+    pickNativeFile()
     return
   }
 
@@ -343,6 +359,11 @@ const pickImage = async () => {
   }
 }
 
+const pickNativeFile = () => {
+  errorMessage.value = ''
+  fileInput.value?.click()
+}
+
 const onFileSelected = async (event: Event) => {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
@@ -354,7 +375,7 @@ const onFileSelected = async (event: Event) => {
 
   errorMessage.value = ''
   isBusy.value = true
-  message.value = '正在上传照片'
+  message.value = '正在上传原文件'
 
   try {
     clearPrintState()
@@ -397,15 +418,20 @@ onUnmounted(() => {
         {{ visibleMessage }}
       </p>
 
-      <button v-if="!pendingUpload" class="primary-action" :disabled="!canPickImage" @click="pickImage">
-        {{ pickButtonText }}
-      </button>
+      <div v-if="!pendingUpload" class="upload-actions">
+        <button class="primary-action" :disabled="!canPickImage" @click="pickImage">
+          {{ pickButtonText }}
+        </button>
+        <button v-if="useWechatSdk" class="secondary-action" :disabled="isBusy" @click="pickNativeFile">
+          原文件上传测试
+        </button>
+      </div>
 
       <input
         ref="fileInput"
         class="file-input"
         type="file"
-        accept="image/*"
+        accept="image/*,.heic,.heif"
         @change="onFileSelected"
       />
 
@@ -417,6 +443,9 @@ onUnmounted(() => {
         <div class="print-preview-sheet">
           <img class="photo-preview" :src="pendingUpload.previewUrl" :alt="pendingUpload.originalName" />
         </div>
+        <p class="upload-meta">
+          {{ pendingUpload.originalName }} · {{ pendingUpload.contentType }} · {{ formatFileSize(pendingUpload.size) }}
+        </p>
 
         <div class="preview-actions" :class="{ 'is-single': currentJob }">
           <button class="secondary-action" :disabled="!canPickImage" @click="pickImage">
